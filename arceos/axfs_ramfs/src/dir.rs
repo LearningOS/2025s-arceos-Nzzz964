@@ -67,6 +67,13 @@ impl DirNode {
         children.remove(name);
         Ok(())
     }
+
+    pub fn rename_node(&self, src: &str, dst: &str) -> VfsResult {
+        let mut children = self.children.write();
+        let node = children.remove(src).ok_or(VfsError::NotFound)?;
+        children.insert(dst.into(), node);
+        Ok(())
+    }
 }
 
 impl VfsNodeOps for DirNode {
@@ -162,6 +169,33 @@ impl VfsNodeOps for DirNode {
             Err(VfsError::InvalidInput) // remove '.' or '..
         } else {
             self.remove_node(name)
+        }
+    }
+
+    fn rename(&self, src_path: &str, dst_path: &str) -> VfsResult {
+        let (name, rest) = split_path(src_path);
+        if let Some(rest) = rest {
+            match name {
+                "" | "." => self.rename(rest, dst_path),
+                ".." => self
+                    .parent()
+                    .ok_or(VfsError::NotFound)?
+                    .rename(rest, dst_path),
+                _ => {
+                    let subdir = self
+                        .children
+                        .read()
+                        .get(name)
+                        .ok_or(VfsError::NotFound)?
+                        .clone();
+                    subdir.rename(rest, dst_path)
+                }
+            }
+        } else if name.is_empty() || name == "." || name == ".." {
+            Err(VfsError::InvalidInput)
+        } else {
+            let new = dst_path.rfind("/").map_or(dst_path, |n| &dst_path[n + 1..]);
+            self.rename_node(name, new)
         }
     }
 
