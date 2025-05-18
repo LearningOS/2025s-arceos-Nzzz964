@@ -8,7 +8,7 @@ use axhal::trap::{register_trap_handler, SYSCALL};
 use axtask::current;
 use axtask::TaskExtRef;
 use core::ffi::{c_char, c_int, c_void};
-use memory_addr::{MemoryAddr, VirtAddr, VirtAddrRange};
+use memory_addr::{MemoryAddr, VirtAddrRange};
 
 const SYS_IOCTL: usize = 29;
 const SYS_OPENAT: usize = 56;
@@ -144,35 +144,51 @@ fn sys_mmap(
     prot: i32,
     flags: i32,
     fd: i32,
-    _offset: isize,
+    offset: isize,
 ) -> isize {
     syscall_body!(sys_mmap, {
         let curr = current();
         let mut aspace = curr.task_ext().aspace.lock();
         let size_4k = length.align_up_4k();
 
-        let va = aspace.find_free_area(
+        let va = aspace
+            .find_free_area(
                 aspace.base(),
                 size_4k,
                 VirtAddrRange::new(aspace.base(), aspace.end()),
-            ).ok_or(LinuxError::ENOMEM)?;
+            )
+            .ok_or(LinuxError::ENOMEM)?;
 
         let prot_flags = MmapProt::from_bits(prot).ok_or(LinuxError::EINVAL)?;
 
         // 测试用例没有用上这个 flags
         // let mmap_flags = MmapFlags::from_bits(flags);
 
-        aspace.map_alloc(va, size_4k, prot_flags.into(), true);
+        // seek with args offset
+        api::sys_lseek(fd, offset as i64, 1);
 
-        let mut buffers = aspace
+        let _ = aspace.map_alloc(va, size_4k, prot_flags.into(), true);
+
+        let buffers = aspace
             .translated_byte_buffer(va, size_4k)
             .ok_or(LinuxError::EFAULT)?;
 
-        for buffer in buffers {
-            let buflen: i64 = buffer.len().try_into().ok().ok_or(LinuxError::EINVAL)?;
-            api::sys_read(fd, buffer.as_mut_ptr() as _, buflen as _);
+        let mut read_bytes = 0;
 
-            api::sys_lseek(fd, buflen, 1);
+        for buffer in buffers {
+            let remain_bytes = length - read_bytes;
+
+            // 需要读取的 字节数 小于 buffer 长度
+            if buffer.len() > remain_bytes {
+                api::sys_read(fd, buffer.as_mut_ptr() as _, remain_bytes);
+                break;
+            } else {
+                api::sys_read(fd, buffer.as_mut_ptr() as _, buffer.len());
+                read_bytes += buffer.len();
+
+                let lseek: i64 = buffer.len().try_into().ok().ok_or(LinuxError::EINVAL)?;
+                api::sys_lseek(fd, lseek, 1);
+            }
         }
 
         Ok(va.as_usize() as isize)
